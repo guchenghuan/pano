@@ -1,0 +1,37 @@
+# Release pipeline: pushing a tag like v0.1.0 builds static binaries for
+# macOS/Linux × amd64/arm64 and publishes them (plus .sha256 files) as
+# release assets named pano_<os>_<arch>.tar.gz — the names install.sh
+# downloads from /releases/latest/download/.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [darwin, linux]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: build
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -trimpath -ldflags "-s -w" -o "dist/pano" .
+          tar -czf "dist/pano_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" -C dist pano
+          (cd dist && shasum -a 256 "pano_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" > "pano_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz.sha256")
+      - name: publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz*

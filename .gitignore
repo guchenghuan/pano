@@ -1,0 +1,6 @@
+pano
+pano_smoke_bin
+smoke.out
+.gotmp/
+docs/screenshots/json/
+*_test.go
