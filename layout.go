@@ -28,6 +28,18 @@ func (p preset) String() string {
 	}
 }
 
+// presetByName maps a CLI/layout name to a preset. "grid" is accepted as a
+// short alias for "even-grid".
+func presetByName(name string) (preset, bool) {
+	switch name {
+	case "grid", "even-grid":
+		return presetEvenGrid, true
+	case "main-left":
+		return presetMainLeft, true
+	}
+	return presetEvenGrid, false
+}
+
 const (
 	defaultMain  = 0.65 // default main-pane share for main-left
 	weightStep   = 0.05 // keyboard ratio adjustment step

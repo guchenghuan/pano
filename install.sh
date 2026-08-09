@@ -3,11 +3,11 @@
 # binary from the latest GitHub release, verify its checksum, and install
 # it into a directory on PATH.
 #
-#   curl -fsSL https://raw.githubusercontent.com/OWNER/pano/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/guchenghuan/pano/master/install.sh | sh
 #
 set -eu
 
-REPO="OWNER/pano" # ← 推 GitHub 后把 OWNER 换成你的用户名
+REPO="guchenghuan/pano"
 BIN="pano"
 
 main() {

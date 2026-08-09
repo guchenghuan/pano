@@ -11,6 +11,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "ctl" {
 		os.Exit(runCtlClient(os.Args[2:]))
 	}
+	opts, start, code := parseCLI(os.Args[1:])
+	if !start {
+		os.Exit(code)
+	}
 	if path := agentConfigPath(); path != "" {
 		cfg, warnings, err := loadAgentConfig(path)
 		if err != nil {
@@ -22,7 +26,7 @@ func main() {
 			}
 		}
 	}
-	m := newModel()
+	m := newModel(opts)
 	// External control channel: per-instance unix socket; the path and pane
 	// id reach shells via PANO_SOCK/PANO_PANE (see ctl.go).
 	ctlCh := make(chan ctlMsg, 16)

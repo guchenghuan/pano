@@ -27,15 +27,15 @@ Pano 拒绝多Tab切换，一个屏幕可以观察N个任务状态：**同屏多
 **一行安装**（macOS / Linux，amd64 / arm64 预编译二进制）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/OWNER/pano/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/guchenghuan/pano/master/install.sh | sh
 ```
 
-装到 `/usr/local/bin`（或 `~/.local/bin`），装完直接敲 `pano` 启动。
+装到 `/usr/local/bin`（或 `~/.local/bin`），装完直接敲 `pano` 启动；`pano -h` 查看全部命令。
 
 **从源码构建**（需要 Go ≥ 1.24，无其他依赖，静态二进制）：
 
 ```sh
-git clone https://github.com/OWNER/pano && cd pano
+git clone https://github.com/guchenghuan/pano && cd pano
 go build -o pano .
 ./pano
 ```
@@ -43,6 +43,24 @@ go build -o pano .
 启动后默认打开 2 个终端（`$SHELL`，缺省 `/bin/zsh`），底部一条操作栏。
 
 **如何退出**：点 `[quit]` / `F9` / `Ctrl+g q` / 关掉最后一个窗格。除最后一种外都会先弹确认（防误退）。
+
+## 命令行
+
+`pano` 启动，其余功能走 `-选项` 或子命令；随时 `pano -h` 查看：
+
+```
+pano                          启动 TUI（默认 2 个终端）
+pano -n 4                     启动并开 4 个终端
+pano -layout main-left        指定初始布局（grid | main-left）
+pano -restore                 启动并直接恢复上次会话（跳过 [y/n] 提示）
+pano -fresh                   丢弃已保存会话，全新启动
+pano session                  查看已保存会话（窗格数/标题/目录）
+pano session clear            删除会话快照文件
+pano ctl notify "文本"         窗格内红点通知（需在 pano 窗格内执行）
+pano ctl focus                焦点跳到所在窗格
+pano -h / -help               打印用法
+pano -v / -version            打印版本
+```
 
 ## 产品
 

@@ -71,8 +71,12 @@ type Model struct {
 
 	// pendingRestore holds a saved session awaiting the startup [y/n]
 	// prompt; while set, no default panes are created and input goes to the
-	// prompt.
+	// prompt. restoreMode (from -restore/-fresh) can bypass the prompt.
 	pendingRestore *sessionFile
+	restoreMode    restoreMode
+
+	// startPanes is how many terminals a fresh start opens (-n flag).
+	startPanes int
 
 	titleInput textinput.Model
 
@@ -128,20 +132,43 @@ type Model struct {
 	quitting  bool
 }
 
-func newModel() Model {
+func newModel(opts startOptions) Model {
 	ti := textinput.New()
 	ti.Prompt = ""
 	ti.CharLimit = 64
+	p, _ := presetByName(opts.layout) // validated by parseCLI
+	if opts.panes < 1 {
+		opts.panes = 2
+	}
 	return Model{
 		refreshCh:     make(chan struct{}, 1),
 		exitCh:        make(chan *Pane, 16),
 		titleInput:    ti,
 		mainRatio:     defaultMain,
+		preset:        p,
+		restoreMode:   opts.restore,
+		startPanes:    opts.panes,
 		sidebarLeft:   true,
 		sidebarW:      sidebarWidth,
 		cursorOn:      true,
 		lastClickPane: -1,
 		nextID:        1,
+	}
+}
+
+// startDefaultPanes opens the initial set of terminals for a fresh start.
+func (m *Model) startDefaultPanes() {
+	for i := 0; i < m.startPanes; i++ {
+		m.addPane("")
+	}
+}
+
+// discardPendingRestore drops a saved session without restoring it: the
+// snapshot file is removed, mirroring a "decline" answer at the prompt.
+func (m *Model) discardPendingRestore() {
+	m.pendingRestore = nil
+	if path := sessionPath(); path != "" {
+		_ = os.Remove(path)
 	}
 }
 
@@ -568,10 +595,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case len(m.panes) > 0:
 			m.layoutPanes()
 		case m.pendingRestore != nil:
-			// Waiting for the restore prompt: create no panes yet.
+			// A saved session exists: -restore/-fresh settle it right
+			// away; otherwise keep waiting for the [y/n] prompt.
+			switch m.restoreMode {
+			case restoreAuto:
+				sf := m.pendingRestore
+				m.pendingRestore = nil
+				m.restoreSession(sf)
+			case restoreNever:
+				m.discardPendingRestore()
+				m.startDefaultPanes()
+			}
 		default:
-			m.addPane("")
-			m.addPane("")
+			m.startDefaultPanes()
 		}
 		return m, nil
 
@@ -714,19 +750,16 @@ func fKeyCommand(t tea.KeyType) string {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Session restore prompt: "y"/"Y" restores the saved session; any other
-	// key declines (the saved file is discarded) and starts the default two
-	// panes. The key is swallowed either way.
+	// key declines (the saved file is discarded) and starts fresh panes.
+	// The key is swallowed either way.
 	if m.pendingRestore != nil {
 		sf := m.pendingRestore
 		m.pendingRestore = nil
 		if s := msg.String(); s == "y" || s == "Y" {
 			m.restoreSession(sf)
 		} else {
-			if path := sessionPath(); path != "" {
-				_ = os.Remove(path)
-			}
-			m.addPane("")
-			m.addPane("")
+			m.discardPendingRestore()
+			m.startDefaultPanes()
 		}
 		return m, nil
 	}

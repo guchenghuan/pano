@@ -28,7 +28,7 @@ jobs:
         run: |
           mkdir -p dist
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -ldflags "-s -w" -o "dist/pano" .
+            go build -trimpath -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o "dist/pano" .
           tar -czf "dist/pano_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" -C dist pano
           (cd dist && shasum -a 256 "pano_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" > "pano_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz.sha256")
       - name: publish
