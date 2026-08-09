@@ -350,6 +350,24 @@ func (m *Model) toggleFocusMode() {
 	m.layoutPanes()
 }
 
+// titleClick classifies a click on pane: titleRow reports it landed on the
+// pane's title row (checked against the current, pre-relayout rects), and
+// dbl reports the click completes a double-click on that row. Only title-row
+// clicks feed the double-click bookkeeping.
+func (m *Model) titleClick(pane, y int) (titleRow, dbl bool) {
+	r := m.rects()[pane]
+	if y != r.y {
+		return false, false
+	}
+	now := time.Now()
+	if m.lastClickPane == pane && now.Sub(m.lastClickTime) < doubleClickWindow {
+		m.lastClickPane = -1
+		return true, true
+	}
+	m.lastClickPane, m.lastClickTime = pane, now
+	return true, false
+}
+
 // startTitleEdit opens the title editor for the focused pane.
 func (m *Model) startTitleEdit() tea.Cmd {
 	if len(m.panes) == 0 {
@@ -1277,6 +1295,11 @@ func (m Model) handleMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 			// Keyboard ownership in focus mode: clicking a mini hands the
 			// arrows to the sidebar; clicking the main view hands them to
 			// the terminal.
+			//
+			// The title-row test runs before any relayout: click-promote
+			// can move the title row, which would pull it out from under
+			// the second click of a double-click.
+			titleRow, dbl := m.titleClick(m.pressPane, ev.Y)
 			if m.mode == modeFocus {
 				if m.pressPane == m.focus {
 					m.focusNav = false
@@ -1288,17 +1311,15 @@ func (m Model) handleMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 				m.focus = m.pressPane
 				// Click-promote: the clicked pane takes promoteRatio in each
 				// split along its path (grid-mode mouse clicks only).
-				promotePane(m.root, m.panes[m.focus])
+				// Title-row clicks are exempt — they aim at the title, not
+				// at resizing, and promote would break double-click rename.
+				if !titleRow {
+					promotePane(m.root, m.panes[m.focus])
+				}
 			}
 			m.layoutPanes()
-			r := m.rects()[m.pressPane]
-			if ev.Y == r.y {
-				now := time.Now()
-				if m.lastClickPane == m.pressPane && now.Sub(m.lastClickTime) < doubleClickWindow {
-					m.lastClickPane = -1
-					return m, m.startTitleEdit()
-				}
-				m.lastClickPane, m.lastClickTime = m.pressPane, now
+			if dbl {
+				return m, m.startTitleEdit()
 			}
 		}
 		return m, nil
@@ -1368,11 +1389,20 @@ func (m Model) handleMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if len(m.dragBounds) > 0 && !m.dragging && m.pressPane >= 0 {
-			// Press on a boundary without movement: treat as a click (and
-			// promote the clicked pane, like a plain grid click).
+			// Press on a boundary without movement: treat as a click. The
+			// row just below a horizontal border is a pane's title row, so
+			// a click there focuses and feeds double-click rename detection
+			// instead of promoting (promote would move the title row away
+			// from the second click).
+			titleRow, dbl := m.titleClick(m.pressPane, ev.Y)
 			m.focus = m.pressPane
-			promotePane(m.root, m.panes[m.focus])
+			if !titleRow {
+				promotePane(m.root, m.panes[m.focus])
+			}
 			m.layoutPanes()
+			if dbl {
+				return m, m.startTitleEdit()
+			}
 		}
 		m.dragging = false
 		m.dragBounds = nil
