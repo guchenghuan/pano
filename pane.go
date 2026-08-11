@@ -374,3 +374,62 @@ func (p *Pane) tailText(n int) string {
 	}
 	return sb.String()
 }
+
+// selectedText extracts the text between combined-buffer cells (x0,y0) and
+// (x1,y1) — either direction, normalized here. Trailing spaces are trimmed
+// per line and blank edge lines dropped, so the clipboard gets the content,
+// not the padding. Wide-glyph dummy cells contribute nothing.
+func (p *Pane) selectedText(x0, y0, x1, y1 int) string {
+	if y0 > y1 || (y0 == y1 && x0 > x1) {
+		x0, y0, x1, y1 = x1, y1, x0, y0
+	}
+	p.vt.Lock()
+	defer p.vt.Unlock()
+	cols, rows := p.vt.Size()
+	total := len(p.scrollback) + rows
+	if y0 >= total {
+		return ""
+	}
+	if y1 >= total {
+		y1 = total - 1
+	}
+	var sb strings.Builder
+	for y := y0; y <= y1; y++ {
+		var glyphs []vt10x.Glyph
+		if y < len(p.scrollback) {
+			glyphs = p.scrollback[y]
+		} else {
+			glyphs = make([]vt10x.Glyph, cols)
+			for x := range glyphs {
+				glyphs[x] = p.vt.Cell(x, y-len(p.scrollback))
+			}
+		}
+		lo, hi := 0, cols-1
+		if y == y0 {
+			lo = x0
+		}
+		if y == y1 {
+			hi = x1
+		}
+		if hi > cols-1 {
+			hi = cols - 1
+		}
+		var lb strings.Builder
+		for x := lo; x <= hi && x < len(glyphs); x++ {
+			g := glyphs[x]
+			if g.IsWideDummy() {
+				continue
+			}
+			ch := g.Char
+			if ch == 0 {
+				ch = ' '
+			}
+			lb.WriteRune(ch)
+		}
+		sb.WriteString(strings.TrimRight(lb.String(), " "))
+		if y < y1 {
+			sb.WriteByte('\n')
+		}
+	}
+	return strings.Trim(sb.String(), "\n")
+}

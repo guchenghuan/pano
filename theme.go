@@ -66,3 +66,21 @@ var (
 	btnKeyStyle = lipgloss.NewStyle().Foreground(accentSoftColor)
 	btnActStyle = lipgloss.NewStyle().Foreground(textPrimary)
 )
+
+// Frame runes: rounded corners keep the chrome soft against the dense
+// box-drawing output of child apps. All single-width — the frame math in
+// renderPaneFrame depends on it.
+const (
+	frameTL, frameTR = "╭", "╮"
+	frameBL, frameBR = "╰", "╯"
+	frameH, frameV   = "─", "│"
+)
+
+// Nerd Font icons (private use area), each with a trailing space built in.
+// Centralized so the set can be re-tuned — or blanked for a terminal
+// without a patched font — in one place.
+const (
+	iconAgent = "\uf544 " // robot: foreground AI agent in the pane title
+	iconNotes = "\uf0f3 " // bell: notification history drawer header
+	iconDirs  = "\uf07b " // folder: directory picker drawer header
+)

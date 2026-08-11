@@ -18,6 +18,8 @@ const (
 	attrItalic
 	attrBlink
 	attrWrap
+	attrWide   // first cell of a double-width glyph (CJK etc.)
+	attrWDummy // trailing placeholder cell of a double-width glyph
 )
 
 const (
@@ -66,6 +68,18 @@ type Glyph struct {
 	Char   rune
 	Mode   int16
 	FG, BG Color
+}
+
+// IsWideDummy reports whether the cell is the trailing placeholder of a
+// double-width glyph. It carries no content of its own — the renderer must
+// emit nothing for it (the wide glyph in the preceding cell already spans
+// both display cells).
+func (g Glyph) IsWideDummy() bool { return g.Mode&attrWDummy != 0 }
+
+// Style reports the glyph's SGR rendition attributes for pass-through to
+// the outer terminal. Blink is intentionally dropped (rendered as noise).
+func (g Glyph) Style() (bold, italic, underline bool) {
+	return g.Mode&attrBold != 0, g.Mode&attrItalic != 0, g.Mode&attrUnderline != 0
 }
 
 type line []Glyph
@@ -279,6 +293,16 @@ func (t *State) setChar(c rune, attr *Glyph, x, y int) {
 			c = gfxCharTable[c-0x41]
 		}
 	}
+	// Overwriting one half of a double-width glyph must blank the other
+	// half too, or it lingers as an orphan (a dummy renders as nothing, a
+	// lone wide glyph renders two cells wide and shifts the whole line).
+	blank := Glyph{Char: ' ', FG: attr.FG, BG: attr.BG}
+	if t.lines[y][x].Mode&attrWDummy != 0 && x > 0 {
+		t.lines[y][x-1] = blank
+	}
+	if x+1 < t.cols && t.lines[y][x+1].Mode&attrWDummy != 0 {
+		t.lines[y][x+1] = blank
+	}
 	t.changed |= ChangedScreen
 	t.dirty[y] = true
 	t.lines[y][x] = *attr
@@ -389,6 +413,18 @@ func (t *State) clear(x0, y0, x1, y1 int) {
 	t.changed |= ChangedScreen
 	for y := y0; y <= y1; y++ {
 		t.dirty[y] = true
+		// The clear range may split a double-width glyph pair at either
+		// boundary; blank the orphaned half left outside the range.
+		if x0 > 0 && t.lines[y][x0-1].Mode&attrWide != 0 {
+			g := t.cur.Attr
+			g.Char = ' '
+			t.lines[y][x0-1] = g
+		}
+		if x1+1 < t.cols && t.lines[y][x1+1].Mode&attrWDummy != 0 {
+			g := t.cur.Attr
+			g.Char = ' '
+			t.lines[y][x1+1] = g
+		}
 		for x := x0; x <= x1; x++ {
 			t.lines[y][x] = t.cur.Attr
 			t.lines[y][x].Char = ' '

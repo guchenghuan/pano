@@ -62,6 +62,38 @@ func keyBytes(msg tea.KeyMsg, appCursor bool) []byte {
 		return []byte("\x1b[6~")
 	case tea.KeyShiftTab:
 		return []byte("\x1b[Z")
+	// Modified arrows/Home/End use the xterm CSI 1;{mod}X encoding
+	// (mod: 2=Shift, 5=Ctrl, 6=Ctrl+Shift), independent of DECCKM. Nested
+	// TUI apps (kimi cli, Claude Code…) need these for e.g. Shift+arrow
+	// text selection in their input boxes.
+	case tea.KeyShiftUp:
+		return []byte("\x1b[1;2A")
+	case tea.KeyShiftDown:
+		return []byte("\x1b[1;2B")
+	case tea.KeyShiftRight:
+		return []byte("\x1b[1;2C")
+	case tea.KeyShiftLeft:
+		return []byte("\x1b[1;2D")
+	case tea.KeyCtrlUp:
+		return []byte("\x1b[1;5A")
+	case tea.KeyCtrlDown:
+		return []byte("\x1b[1;5B")
+	case tea.KeyCtrlRight:
+		return []byte("\x1b[1;5C")
+	case tea.KeyCtrlLeft:
+		return []byte("\x1b[1;5D")
+	case tea.KeyCtrlShiftUp:
+		return []byte("\x1b[1;6A")
+	case tea.KeyCtrlShiftDown:
+		return []byte("\x1b[1;6B")
+	case tea.KeyCtrlShiftRight:
+		return []byte("\x1b[1;6C")
+	case tea.KeyCtrlShiftLeft:
+		return []byte("\x1b[1;6D")
+	case tea.KeyCtrlShiftHome:
+		return []byte("\x1b[1;6H")
+	case tea.KeyCtrlShiftEnd:
+		return []byte("\x1b[1;6F")
 	case tea.KeyF1:
 		return []byte("\x1bOP")
 	case tea.KeyF2:

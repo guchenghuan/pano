@@ -7,7 +7,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -115,6 +117,18 @@ type Model struct {
 	lastX      int
 	lastY      int
 
+	// text selection: a press in a pane body arms a selection, any motion
+	// activates it (reverse-highlighted), release copies to the clipboard.
+	// Coordinates are in the pane's combined buffer (scrollback + screen
+	// lines), so the highlight tracks its content across scrolling.
+	selPane   int  // pane owning the selection (-1 = none)
+	selArmed  bool // press recorded, no motion yet (still a click)
+	selActive bool // selection visible
+	selX0     int  // anchor cell
+	selY0     int
+	selX1     int // moving end
+	selY1     int
+
 	// double-click detection for title editing
 	lastClickPane int
 	lastClickTime time.Time
@@ -152,6 +166,7 @@ func newModel(opts startOptions) Model {
 		sidebarW:      sidebarWidth,
 		cursorOn:      true,
 		lastClickPane: -1,
+		selPane:       -1,
 		nextID:        1,
 	}
 }
@@ -307,6 +322,7 @@ func (m *Model) closePane(i int) {
 	if i < 0 || i >= len(m.panes) {
 		return
 	}
+	m.selClear() // pane indices shift; a stale selection would point elsewhere
 	p := m.panes[i]
 	m.panes = append(m.panes[:i], m.panes[i+1:]...)
 	p.Close()
@@ -686,6 +702,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		mm, cmd := m.handleKey(msg)
 		m2 := mm.(Model)
+		m2.selClear() // any key drops the mouse text selection highlight
 		m2.clearFocusedAttention()
 		return m2, cmd
 
@@ -1057,6 +1074,65 @@ func (m *Model) paneAt(x, y int) int {
 	return -1
 }
 
+// selClear drops any armed or active text selection.
+func (m *Model) selClear() {
+	m.selPane, m.selArmed, m.selActive = -1, false, false
+}
+
+// combinedTop returns the combined-buffer (scrollback + screen) line index
+// shown at the top of pane i's body, mirroring the render path: the
+// scrolled window when the focused pane is scrolled back, the live screen
+// otherwise.
+func (m *Model) combinedTop(i, ch int) int {
+	p := m.panes[i]
+	p.vt.Lock()
+	defer p.vt.Unlock()
+	if i == m.focus && m.scrolling && p.scroll > 0 {
+		_, rows := p.vt.Size()
+		top := len(p.scrollback) + rows - p.scroll - ch
+		if top < 0 {
+			top = 0
+		}
+		return top
+	}
+	return len(p.scrollback)
+}
+
+// selCoords maps a mouse position to combined-buffer selection coordinates
+// for pane i. Positions over the frame are clamped to the nearest body cell;
+// ok=false when (x,y) lies outside the pane rect entirely.
+func (m *Model) selCoords(i, x, y int) (sx, sy int, ok bool) {
+	r := m.rects()[i]
+	if x < r.x || x >= r.x+r.w || y < r.y || y >= r.y+r.h {
+		return 0, 0, false
+	}
+	cw, ch := contentSize(r)
+	cx := x - r.x - 1
+	if cx < 0 {
+		cx = 0
+	}
+	if cx > cw-1 {
+		cx = cw - 1
+	}
+	cy := y - r.y - 1
+	if cy < 0 {
+		cy = 0
+	}
+	if cy > ch-1 {
+		cy = ch - 1
+	}
+	return cx, m.combinedTop(i, ch) + cy, true
+}
+
+// inPaneBody reports whether (x,y) is strictly inside pane i's body (not
+// the frame or title row) — only body presses arm a text selection.
+func (m *Model) inPaneBody(i, x, y int) bool {
+	r := m.rects()[i]
+	cw, ch := contentSize(r)
+	cx, cy := x-r.x-1, y-r.y-1
+	return cx >= 0 && cx < cw && cy >= 0 && cy < ch
+}
+
 func (m Model) handleMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 	// Restore prompt pending: the mouse does nothing — answering is
 	// keyboard-only so an accidental click can never discard the session.
@@ -1255,6 +1331,8 @@ func (m Model) handleMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 		}
 		m.pressX, m.pressY = ev.X, ev.Y
 		m.pressPane = m.paneAt(ev.X, ev.Y)
+		// Any new press replaces the previous text selection.
+		m.selClear()
 		// Border drags only exist in the grid; in focus mode the sidebar
 		// minis never drag — a press there is always a click. The sidebar
 		// divider itself is draggable (pending until the threshold).
@@ -1318,6 +1396,18 @@ func (m Model) handleMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.layoutPanes()
+			// A press inside the pane body (not the title row, and in focus
+			// mode only the main view) arms a text selection: any motion
+			// from here turns it into a drag-select.
+			if !titleRow && m.inPaneBody(m.pressPane, ev.X, ev.Y) &&
+				(m.mode != modeFocus || m.pressPane == m.focus) {
+				if sx, sy, ok := m.selCoords(m.pressPane, ev.X, ev.Y); ok {
+					m.selPane = m.pressPane
+					m.selArmed = true
+					m.selX0, m.selY0 = sx, sy
+					m.selX1, m.selY1 = sx, sy
+				}
+			}
 			if dbl {
 				return m, m.startTitleEdit()
 			}
@@ -1345,6 +1435,18 @@ func (m Model) handleMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// Text selection drag: the press armed it in a pane body; any motion
+		// activates the highlight and tracks the moving end (clamped to the
+		// pane's body when the pointer crosses the frame).
+		if m.selArmed || m.selActive {
+			if m.selPane >= 0 && m.selPane < len(m.panes) {
+				if sx, sy, ok := m.selCoords(m.selPane, ev.X, ev.Y); ok {
+					m.selX1, m.selY1 = sx, sy
+				}
+				m.selActive = true
+			}
+			return m, nil
+		}
 		if len(m.dragBounds) == 0 {
 			return m, nil
 		}
@@ -1369,6 +1471,28 @@ func (m Model) handleMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseActionRelease:
+		// Text selection release: copy the highlighted text to the system
+		// clipboard. The highlight itself stays until the next press or
+		// key, like a native terminal's selection. A press-release without
+		// motion was a plain click (already handled at press) — nothing to
+		// do beyond disarming. Copying happens only for a selection dragged
+		// during THIS press (selArmed still set): a leftover highlight's
+		// stray release (e.g. after a status-bar click) must not re-copy.
+		if m.selArmed || m.selActive {
+			dragged := m.selArmed && m.selActive
+			m.selArmed = false
+			if dragged && m.selPane >= 0 && m.selPane < len(m.panes) {
+				text := m.panes[m.selPane].selectedText(m.selX0, m.selY0, m.selX1, m.selY1)
+				if strings.TrimSpace(text) != "" {
+					if err := clipboard.WriteAll(text); err != nil {
+						m.setNotice("copy failed: no clipboard tool (xclip/xsel/wl-copy)")
+					} else {
+						m.setNotice(fmt.Sprintf("copied %d chars", utf8.RuneCountInString(text)))
+					}
+				}
+			}
+			return m, nil
+		}
 		// Sidebar divider: a press without a drag is just a pane click.
 		if m.sbPending {
 			wasDragging := m.sbDragging

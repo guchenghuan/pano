@@ -1,5 +1,14 @@
 package vt10x
 
+import "github.com/mattn/go-runewidth"
+
+// runeWidth measures printable runes with East Asian *ambiguous* characters
+// pinned to narrow (1 cell), matching what iTerm2/Terminal.app/WezTerm do by
+// default. go-runewidth's default condition is locale-dependent (it widens
+// box-drawing chars like ─ ╭ under a CJK locale), which would disagree with
+// the outer terminal's actual rendering — never use it here.
+var runeWidth = runewidth.Condition{EastAsianWidth: false}
+
 func isControlCode(c rune) bool {
 	return c < 0x20 || c == 0177
 }
@@ -23,10 +32,44 @@ func (t *State) parse(c rune) {
 		t.logln("insert mode not implemented")
 	}
 
+	// Double-width glyphs (CJK, some emoji) occupy two cells: the glyph in
+	// the first, an attrWDummy placeholder in the second. gfx-charset runes
+	// are translated to single-cell symbols, so they never take this path.
+	wide := t.cur.Attr.Mode&attrGfx == 0 && runeWidth.RuneWidth(c) == 2
+	if wide && t.cur.X+1 >= t.cols {
+		// No room for both cells on this line: blank the last cell and
+		// wrap first (st behavior).
+		t.setChar(' ', &t.cur.Attr, t.cur.X, t.cur.Y)
+		t.newline(true)
+	}
+
 	t.setChar(c, &t.cur.Attr, t.cur.X, t.cur.Y)
-	if t.cur.X+1 < t.cols {
-		t.moveTo(t.cur.X+1, t.cur.Y)
+	if !wide {
+		if t.cur.X+1 < t.cols {
+			t.moveTo(t.cur.X+1, t.cur.Y)
+		} else {
+			t.cur.State |= cursorWrapNext
+		}
+		return
+	}
+
+	x, y := t.cur.X, t.cur.Y
+	t.lines[y][x].Mode |= attrWide
+	// The dummy write may itself split an existing wide pair at x+1/x+2.
+	if x+2 < t.cols && t.lines[y][x+2].Mode&attrWDummy != 0 {
+		t.lines[y][x+2] = Glyph{Char: ' ', FG: t.cur.Attr.FG, BG: t.cur.Attr.BG}
+	}
+	d := t.cur.Attr
+	d.Char = 0
+	d.Mode |= attrWDummy
+	t.lines[y][x+1] = d
+	t.dirty[y] = true
+	if x+2 < t.cols {
+		t.moveTo(x+2, y)
 	} else {
+		// The glyph ends exactly at the right edge: rest the cursor on the
+		// dummy cell and defer the wrap to the next printable rune.
+		t.moveTo(x+1, y)
 		t.cur.State |= cursorWrapNext
 	}
 }

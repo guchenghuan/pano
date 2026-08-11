@@ -31,12 +31,37 @@ func lipglossColor(c vt10x.Color) lipgloss.TerminalColor {
 
 // styleKey identifies the visual style of a run of adjacent cells.
 type styleKey struct {
-	fg, bg vt10x.Color
-	cur    bool // our hardware cursor cell: white block
-	inv    bool // app-drawn reverse cell with default colors (e.g. Ink cursor)
+	fg, bg                  vt10x.Color
+	cur                     bool // our hardware cursor cell: white block
+	inv                     bool // app-drawn reverse cell with default colors (e.g. Ink cursor)
+	sel                     bool // inside the mouse text selection: reverse
+	bold, italic, underline bool
 }
 
 var plainKey = styleKey{fg: vt10x.DefaultFG, bg: vt10x.DefaultBG}
+
+// viewSel is a normalized mouse text selection in view-line coordinates
+// (0,0 = top-left body cell); active=false means no selection.
+type viewSel struct {
+	active         bool
+	ax, ay, bx, by int
+}
+
+func (s viewSel) contains(x, y int) bool {
+	if !s.active || y < s.ay || y > s.by {
+		return false
+	}
+	if s.ay == s.by {
+		return x >= s.ax && x <= s.bx
+	}
+	if y == s.ay {
+		return x >= s.ax
+	}
+	if y == s.by {
+		return x <= s.bx
+	}
+	return true
+}
 
 func (k styleKey) style() lipgloss.Style {
 	if k.cur {
@@ -57,13 +82,30 @@ func (k styleKey) style() lipgloss.Style {
 	if c := lipglossColor(k.bg); c != nil {
 		st = st.Background(c)
 	}
+	// SGR rendition pass-through: child apps' bold headings, italics and
+	// underlined links survive the trip to the outer terminal.
+	if k.bold {
+		st = st.Bold(true)
+	}
+	if k.italic {
+		st = st.Italic(true)
+	}
+	if k.underline {
+		st = st.Underline(true)
+	}
+	if k.sel {
+		// Mouse text selection: reverse video, same as native terminal
+		// selection looks.
+		st = st.Reverse(true)
+	}
 	return st
 }
 
 // renderGlyphs renders h rows of glyph lines into exactly h strings of w
 // display cells each, merging adjacent cells that share the same colors into
-// a single styled run. cursorX/cursorY mark the cursor cell (-1 = none).
-func renderGlyphs(lines [][]vt10x.Glyph, w, h, cursorX, cursorY int) string {
+// a single styled run. cursorX/cursorY mark the cursor cell (-1 = none);
+// sel marks the mouse text selection in view-line coordinates.
+func renderGlyphs(lines [][]vt10x.Glyph, w, h, cursorX, cursorY int, sel viewSel) string {
 	var sb strings.Builder
 	for y := 0; y < h; y++ {
 		if y > 0 {
@@ -94,10 +136,16 @@ func renderGlyphs(lines [][]vt10x.Glyph, w, h, cursorX, cursorY int) string {
 			key := plainKey
 			if x < len(glyphs) {
 				g := glyphs[x]
+				if g.IsWideDummy() {
+					// Trailing cell of a double-width glyph: emits
+					// nothing, the glyph already spans both cells.
+					continue
+				}
 				if g.Char != 0 {
 					ch = g.Char
 				}
-				key = styleKey{fg: g.FG, bg: g.BG}
+				b, i, u := g.Style()
+				key = styleKey{fg: g.FG, bg: g.BG, bold: b, italic: i, underline: u}
 				if g.FG == vt10x.DefaultBG && g.BG == vt10x.DefaultFG {
 					// Reversed default cell: an application-drawn cursor or
 					// highlight block. It must not render as plain space.
@@ -106,6 +154,9 @@ func renderGlyphs(lines [][]vt10x.Glyph, w, h, cursorX, cursorY int) string {
 			}
 			if cursorX == x && cursorY == y {
 				key.cur = true
+			}
+			if sel.contains(x, y) {
+				key.sel = true
 			}
 			styled := key != plainKey
 			if styled != runStyled || (styled && key != runKey) {
@@ -140,7 +191,7 @@ func vtRow(vt vt10x.Terminal, y, cols int) []vt10x.Glyph {
 }
 
 // renderVT dumps the live vt10x screen buffer, h lines of w cells.
-func renderVT(vt vt10x.Terminal, w, h int, showCursor bool) string {
+func renderVT(vt vt10x.Terminal, w, h int, showCursor bool, sel viewSel) string {
 	vt.Lock()
 	defer vt.Unlock()
 
@@ -154,7 +205,7 @@ func renderVT(vt vt10x.Terminal, w, h int, showCursor bool) string {
 		cur := vt.Cursor()
 		cx, cy = cur.X, cur.Y
 	}
-	return renderGlyphs(lines, w, h, cx, cy)
+	return renderGlyphs(lines, w, h, cx, cy, sel)
 }
 
 // overlayText centers a dim placeholder text in the middle line of s.
@@ -249,7 +300,7 @@ func renderMiniBody(p *Pane, w, h int) string {
 
 // renderScrolled renders the pane's scrollback view: the window of h rows
 // ending scroll lines above the live bottom.
-func renderScrolled(p *Pane, w, h, scroll int) string {
+func renderScrolled(p *Pane, w, h, scroll int, sel viewSel) string {
 	p.vt.Lock()
 	defer p.vt.Unlock()
 
@@ -271,12 +322,12 @@ func renderScrolled(p *Pane, w, h, scroll int) string {
 			lines = append(lines, vtRow(p.vt, idx-len(p.scrollback), cols))
 		}
 	}
-	return renderGlyphs(lines, w, h, -1, -1)
+	return renderGlyphs(lines, w, h, -1, -1, sel)
 }
 
-// renderPane renders one pane into exactly r.w × r.h cells: a thin frame
-// with the title embedded in the top border (`┌─ 1 · zsh ────┐`). Unfocused
-// panes use a frame color close to the background to stay quiet.
+// renderPane renders one pane into exactly r.w × r.h cells: a thin rounded
+// frame with the title embedded in the top border (`╭─ 1 · zsh ────╮`).
+// Unfocused panes use a frame color close to the background to stay quiet.
 func (m Model) renderPane(i int, r rect) string {
 	return m.renderPaneFrame(i, r, false)
 }
@@ -293,19 +344,31 @@ func (m Model) renderPaneFrame(i int, r rect, mini bool) string {
 	focused := i == m.focus
 	cw, ch := contentSize(r)
 
+	// The mouse text selection lives in combined-buffer coordinates; convert
+	// to view-line coordinates for this body's current window.
+	sel := viewSel{}
+	if !mini && m.selActive && m.selPane == i {
+		x0, y0, x1, y1 := m.selX0, m.selY0, m.selX1, m.selY1
+		if y0 > y1 || (y0 == y1 && x0 > x1) {
+			x0, y0, x1, y1 = x1, y1, x0, y0
+		}
+		top := m.combinedTop(i, ch)
+		sel = viewSel{active: true, ax: x0, ay: y0 - top, bx: x1, by: y1 - top}
+	}
+
 	var body string
 	switch {
 	case mini:
 		body = renderMiniBody(p, cw, ch)
 	case focused && m.scrolling && p.scroll > 0:
-		body = renderScrolled(p, cw, ch, p.scroll)
+		body = renderScrolled(p, cw, ch, p.scroll, sel)
 	default:
 		// The terminal cursor is drawn only for the pane that owns the
 		// keyboard: the focused pane in grid mode; the main view in focus
 		// mode only when it owns the keyboard (EDIT). Hidden while editing
 		// the title or during the blink-off phase.
 		showCursor := focused && !m.editing && m.cursorOn && m.cursorAllowed()
-		body = renderVT(p.vt, cw, ch, showCursor)
+		body = renderVT(p.vt, cw, ch, showCursor, sel)
 	}
 
 	frame := blurFrameStyle
@@ -348,14 +411,14 @@ func (m Model) renderPaneFrame(i int, r rect, mini bool) string {
 	if ansi.StringWidth(titleRendered) > maxTitle {
 		titleRendered = ansi.Truncate(titleRendered, maxTitle, "…")
 	}
-	// ┌─␣ + title + ␣dashes + ─ + • + ─┐ : one dash on each side of the
+	// ╭─␣ + title + ␣dashes + ─ + ● + ─╮ : one dash on each side of the
 	// dot for a more balanced look.
 	dashes := r.w - 8 - ansi.StringWidth(titleRendered)
 	if dashes < 1 {
 		dashes = 1
 	}
-	top := frame.Render("┌─ ") + titleRendered + frame.Render(" "+strings.Repeat("─", dashes)+"─") + m.renderDot(p) + frame.Render("─┐")
-	bottom := frame.Render("└"+strings.Repeat("─", r.w-2)+"┘")
+	top := frame.Render(frameTL+frameH+" ") + titleRendered + frame.Render(" "+strings.Repeat(frameH, dashes)+frameH) + m.renderDot(p) + frame.Render(frameH+frameTR)
+	bottom := frame.Render(frameBL + strings.Repeat(frameH, r.w-2) + frameBR)
 
 	var sb strings.Builder
 	sb.WriteString(top)
@@ -366,7 +429,7 @@ func (m Model) renderPaneFrame(i int, r rect, mini bool) string {
 		if y < len(bodyLines) {
 			line = bodyLines[y]
 		}
-		sb.WriteString(frame.Render("│") + line + frame.Render("│"))
+		sb.WriteString(frame.Render(frameV) + line + frame.Render(frameV))
 	}
 	if r.h >= 2 {
 		sb.WriteByte('\n')
@@ -605,7 +668,7 @@ const dirsPickerRows = 10
 // dirsPickerLines renders the dirs picker (header + rows). Live entries
 // (running shells' cwds) carry a ● marker; an empty list says so.
 func (m Model) dirsPickerLines() []string {
-	lines := []string{statusKeyStyle.Render(" terminal dirs ─ enter to open · esc to cancel")}
+	lines := []string{statusKeyStyle.Render(" " + iconDirs + "terminal dirs ─ enter to open · esc to cancel")}
 	n := len(m.dirs)
 	if n > dirsPickerRows {
 		n = dirsPickerRows
@@ -652,7 +715,7 @@ const notesPickerRows = 10
 // notesPickerLines renders the notification history drawer (header + rows),
 // newest first.
 func (m Model) notesPickerLines() []string {
-	lines := []string{statusKeyStyle.Render(" notifications ─ enter to jump · esc to cancel")}
+	lines := []string{statusKeyStyle.Render(" " + iconNotes + "notifications ─ enter to jump · esc to cancel")}
 	n := len(m.notes)
 	if n > notesPickerRows {
 		n = notesPickerRows
@@ -731,7 +794,8 @@ func renderMiniIndicator(up bool, count, w int) string {
 	return text
 }
 
-// renderDot renders the pane's attention dot.
+// renderDot renders the pane's attention dot: a filled circle, legible at a
+// glance even in peripheral vision.
 func (m Model) renderDot(p *Pane) string {
 	st := lipgloss.NewStyle().Foreground(dotIdleColor)
 	switch p.attention() {
@@ -742,12 +806,13 @@ func (m Model) renderDot(p *Pane) string {
 	case attnNotify:
 		st = lipgloss.NewStyle().Foreground(quitColor)
 	}
-	return st.Render("•")
+	return st.Render("●")
 }
 
 // renderTitleMeta composes the pane title with metadata: "N · title ·
-// branch · proc" where the agent name is highlighted. Segments are dropped
-// in reverse priority when space is tight (branch first, then proc).
+// branch · proc" where the agent name (carrying a Nerd Font icon) is
+// highlighted. Segments are dropped in reverse priority when space is
+// tight (branch first, then proc).
 func (m Model) renderTitleMeta(i int, p *Pane, maxW int, baseStyle lipgloss.Style) string {
 	p.stateMu.Lock()
 	proc, branch, agent := p.proc, p.branch, p.agent
@@ -759,15 +824,15 @@ func (m Model) renderTitleMeta(i int, p *Pane, maxW int, baseStyle lipgloss.Styl
 		w := ansi.StringWidth(plain)
 		if withBranch && branch != "" {
 			s += statusBarStyle.Render(" · " + branch)
-			w += 3 + len(branch)
+			w += 3 + ansi.StringWidth(branch)
 		}
 		if withProc && (agent != "" || proc != "") {
 			t, st := proc, statusBarStyle
 			if agent != "" {
-				t, st = agent, agentNameStyle
+				t, st = iconAgent+agent, agentNameStyle
 			}
 			s += st.Render(" · " + t)
-			w += 3 + len(t)
+			w += 3 + ansi.StringWidth(t)
 		}
 		return s, w
 	}
