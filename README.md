@@ -16,8 +16,10 @@ Pano 拒绝多Tab切换，一个屏幕可以观察N个任务状态：**同屏多
 ![专注模式：侧栏实时预览 + 主视图](docs/screenshots/focus.png)
 - **注意力机制**：标题栏四色状态点（绿=有输出/agent 工作 · 黄=未读/agent 等确认 · 红=BEL/OSC 通知 · 灰=闲置），黄/红同步染边框；`F7` 循环跳到下一个待关注窗格
 - **Agent 感知**：识别前台 agent 进程（进程树最深命中），对屏幕尾部做规则匹配；**blocked（等确认）规则永远压过 working（工作中）**——陈旧的 `esc to interrupt` 不会盖住新弹出的确认请求；规则可在 `~/.config/pano/agents.toml` 自由配置
-- **会话复活**：退出自动保存布局树/拖拽比例/各窗格 cwd 与标题/焦点，重启时一键恢复（只恢复目录和布局，不重跑程序）
+- **会话复活**：退出自动保存布局树/拖拽比例/各窗格 cwd 与标题/焦点/ctl 频道订阅，重启时一键恢复（只恢复目录和布局，不重跑程序）
 - **外部控制通道**：每个窗格注入 `PANO_SOCK`/`PANO_PANE`，agent hook 或脚本可直接 `pano ctl notify "构建完成"` / `pano ctl focus`
+- **窗格间联动**：`pano ctl send 2 "测试绿了"` 给别的窗格发红点通知（带发送方来源），`pano ctl type api "make test"` 直接把命令敲进目标窗格——事件 1 跑完自动触发事件 2，n 个窗格可互相编排
+- **协作频道**：`pano ctl watch build --type` 声明一次订阅，`pano ctl emit build "完成了"` 事件自动送达所有订阅者——窗格不用知道对方是谁，双向闭环、合力跑完一个 task
 - **鼠标优先**：操作栏按钮、点击聚焦（带点击提升）、双击标题改名、拖拽调大小、滚轮回滚；键盘党有 F 功能键 + `Ctrl+g` leader + Alt 三套等效入口
 - **元数据标题**：`2 · myproj · main · claude ●`（序号 · 标题 · git 分支 · 前台进程/agent · 状态点），git 分支直读 `.git/HEAD`（含 worktree），不 fork git 进程
 
@@ -58,6 +60,11 @@ pano session                  查看已保存会话（窗格数/标题/目录）
 pano session clear            删除会话快照文件
 pano ctl notify "文本"         窗格内红点通知（需在 pano 窗格内执行）
 pano ctl focus                焦点跳到所在窗格
+pano ctl send 2 "文本"         给 2 号窗格发红点通知（目标：序号 | 标题 | all）
+pano ctl broadcast "文本"      广播给所有其他窗格
+pano ctl type api "make test"  把命令敲进标题为 api 的窗格并回车
+pano ctl watch build --type    订阅 build 频道，事件正文直接敲进本窗格
+pano ctl emit build "完成了"   向 build 频道所有订阅者投递
 pano -h / -help               打印用法
 pano -v / -version            打印版本
 ```
@@ -108,6 +115,53 @@ pano ctl focus                        # 焦点跳到所在窗格
 ```
 
 通过环境变量定位「发命令时所在的窗格」，hook 里不需要知道窗格号。与 OSC 777 转义序列等效，但更易读。
+
+### 窗格间联动（send / type）
+
+同一个 pano 实例内的窗格可以互相寻址，目标写法三选一：**序号**（标题栏上的 1 起始编号）、**标题**（双击标题栏可改名，关窗格后序号会漂移、标题不会）、**all**（除发送方外的所有窗格）：
+
+```sh
+pano ctl send 2 "事件1完成"            # 2 号窗格红点 + 通知历史（带 [1·api] 来源前缀）
+pano ctl send api "构建过了"           # 按标题寻址；同名标题全部命中
+pano ctl broadcast "发版了"            # 广播给所有其他窗格
+pano ctl type 2 "git pull && make"     # 把命令敲进 2 号窗格并回车 = 自动执行
+```
+
+联动编排的典型用法——窗格 1 的脚本跑完后触发窗格 2：
+
+```sh
+make build && pano ctl type 2 "make test" && pano ctl send 2 "构建完成，已开跑测试"
+```
+
+目标匹配不到时，错误会以红点通知**回弹给发送方**，不会静默丢失。注意 `type` 等价于真人打字：目标窗格若有前台程序在运行，字符会进那个程序的 stdin。
+
+### 协作频道（watch / emit）
+
+send/type 是"点对点、一次性"的消息；如果 n 个窗格要建立**持续协作关系**——互相监听、事件来了自动行动、合力跑完一个 task——用订阅频道。窗格只需声明"我关心哪个频道"，不需要知道对方是谁、有几个人：
+
+```sh
+pano ctl watch build            # 订阅 build 频道：事件来了红点通知我
+pano ctl watch build --type     # 订阅，且事件正文直接敲进本窗格（agent 收到即当新指令执行）
+pano ctl unwatch build          # 退订
+pano ctl emit build "构建完成"  # 向频道所有订阅者投递（发送方自己不收）
+```
+
+双向闭环的典型编排——窗格 1 和窗格 2（跑着 agent）合力完成"构建 → 测试"：
+
+```sh
+# 窗格 2：先声明"我盯着 build 频道，有事直接告诉我"
+pano ctl watch build --type
+
+# 窗格 1：干完事件 1 往频道里发一声，不用知道谁在听
+make build && pano ctl emit build "构建完成，产物在 dist/，请跑测试"
+# → 窗格 2 的 agent 直接被敲入这句话，当作新任务接着干
+
+# 窗格 2 的 agent 干完后（脚本或 Stop hook）回一声：
+pano ctl emit build "测试通过，可以合并"
+# → 窗格 1（同样 watch 了 build）收到红点
+```
+
+要点：通知正文带 `[频道·来源]` 前缀（如 `[build·1·api]`）；`emit` 空文本对 notify 订阅者是 bell 提醒、对 `--type` 订阅者跳过（空注入等于误按回车）；emit 到无人订阅的频道，错误回弹发送方；窗格关闭时订阅自动清理。订阅关系随会话快照一起保存和恢复——但恢复的是订阅关系本身，窗格里是全新 shell，`--type` 订阅要在 agent/程序重新跑起来之后才有意义。
 
 ## 键位与鼠标
 

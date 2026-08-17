@@ -4,21 +4,29 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
 // Session resurrection: on quit the layout (split tree + ratios), per-pane
-// title and cwd, and the focus are saved to ~/.config/pano/session.json
-// ($XDG_CONFIG_HOME respected). On startup a saved session is offered as a
-// [y/n] prompt; confirming recreates the panes (fresh shells in their old
-// directories — running programs are never auto-rerun), declining discards
-// the file. Closing the last pane deletes the file instead of saving an
-// empty session.
+// title, cwd and ctl channel subscriptions, and the focus are saved to
+// ~/.config/pano/session.json ($XDG_CONFIG_HOME respected). On startup a
+// saved session is offered as a [y/n] prompt; confirming recreates the panes
+// (fresh shells in their old directories — running programs are never
+// auto-rerun), declining discards the file. Closing the last pane deletes
+// the file instead of saving an empty session.
+
+// sessionSub is one saved ctl channel subscription of a pane.
+type sessionSub struct {
+	Channel string `json:"channel"`
+	Typed   bool   `json:"typed,omitempty"`
+}
 
 // sessionPane is the saved state of one pane (creation order).
 type sessionPane struct {
-	Title string `json:"title"`
-	Dir   string `json:"dir"`
+	Title string       `json:"title"`
+	Dir   string       `json:"dir"`
+	Subs  []sessionSub `json:"subs,omitempty"`
 }
 
 // sessionNode is the serializable mirror of the split tree. Leaves carry a
@@ -64,7 +72,7 @@ func (m *Model) sessionSnapshot() *sessionFile {
 		if p.pid != 0 {
 			dir = procCWD(p.pid)
 		}
-		panes[i] = sessionPane{Title: p.title, Dir: dir}
+		panes[i] = sessionPane{Title: p.title, Dir: dir, Subs: paneSubs(m.subs, p)}
 	}
 	var enc func(n *node) *sessionNode
 	enc = func(n *node) *sessionNode {
@@ -92,6 +100,19 @@ func (m *Model) sessionSnapshot() *sessionFile {
 		Panes:     panes,
 		Root:      enc(m.root),
 	}
+}
+
+// paneSubs collects a pane's ctl channel subscriptions, sorted by channel
+// name so the snapshot is deterministic.
+func paneSubs(subs map[string]map[*Pane]bool, p *Pane) []sessionSub {
+	var out []sessionSub
+	for ch, set := range subs {
+		if typed, ok := set[p]; ok {
+			out = append(out, sessionSub{Channel: ch, Typed: typed})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Channel < out[j].Channel })
+	return out
 }
 
 // writeSession saves the snapshot (best effort; callers ignore the error).
@@ -171,15 +192,32 @@ func buildSessionTree(panes []*Pane, sn *sessionNode) *node {
 // restoreSession recreates the saved session: fresh shells in their old
 // directories with their old titles, the saved tree shape and focus.
 // Directories that no longer open cleanly fall back to the default cwd.
+// ctl channel subscriptions are restored too — the wiring survives, though
+// the panes run fresh shells (programs are never auto-rerun), so a typed
+// subscription only makes sense again once its agent/program is restarted.
 func (m *Model) restoreSession(sf *sessionFile) {
-	for _, sp := range sf.Panes {
+	for i, sp := range sf.Panes {
 		dir := sp.Dir
 		if dir != "" && !dirExists(dir) {
 			dir = ""
 		}
 		m.addPane(dir)
+		p := m.panes[len(m.panes)-1]
 		if sp.Title != "" {
-			m.panes[len(m.panes)-1].title = sp.Title
+			p.title = sp.Title
+		}
+		// Map subscriptions by creation order; a pane that failed to be
+		// created would shift the indexes, so guard on the count.
+		if len(m.panes) == i+1 {
+			for _, sub := range sp.Subs {
+				if sub.Channel == "" {
+					continue
+				}
+				if m.subs[sub.Channel] == nil {
+					m.subs[sub.Channel] = make(map[*Pane]bool)
+				}
+				m.subs[sub.Channel][p] = sub.Typed
+			}
 		}
 	}
 	if len(m.panes) == 0 {

@@ -119,6 +119,12 @@ usage:
   pano session clear       delete the saved session snapshot
   pano ctl notify [text]   red-dot notification from inside a pane
   pano ctl focus           move focus to the current pane
+  pano ctl send <target> [text]   red-dot another pane (index | title | all)
+  pano ctl broadcast [text]       red-dot every other pane
+  pano ctl type <target> <cmd>    type a command into another pane
+  pano ctl watch <chan> [--type]  subscribe this pane to a channel
+  pano ctl unwatch <chan>         unsubscribe this pane from a channel
+  pano ctl emit <chan> [text]     deliver text to every subscriber
   pano -h, -help           show this help
   pano -v, -version        show version
 

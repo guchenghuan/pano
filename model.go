@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -144,6 +145,12 @@ type Model struct {
 	ctlCh     chan ctlMsg // external control commands (nil = disabled)
 	nextID    int
 	quitting  bool
+
+	// ctl channels: channel name → subscriber pane → typed delivery (true =
+	// emitted text is typed into the pane, false = red-dot notification).
+	// Updated only from Update, so no locking; entries are removed when a
+	// pane unwatches or is closed.
+	subs map[string]map[*Pane]bool
 }
 
 func newModel(opts startOptions) Model {
@@ -168,6 +175,7 @@ func newModel(opts startOptions) Model {
 		lastClickPane: -1,
 		selPane:       -1,
 		nextID:        1,
+		subs:          make(map[string]map[*Pane]bool),
 	}
 }
 
@@ -326,6 +334,7 @@ func (m *Model) closePane(i int) {
 	p := m.panes[i]
 	m.panes = append(m.panes[:i], m.panes[i+1:]...)
 	p.Close()
+	m.unsubscribeAll(p)
 	m.root = buildTree(m.panes, m.preset, m.mainRatio)
 	if m.focus >= len(m.panes) {
 		m.focus = len(m.panes) - 1
@@ -649,25 +658,98 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitRefresh(m.refreshCh)
 
 	case ctlMsg:
-		// External control command: find the target pane by its stable id.
+		// External control command. notify/focus act on the sender's own
+		// pane (looked up by its stable id); send/type address panes by
+		// selector (1-based index, title or "all") — see ctl.go.
+		senderIdx := -1
 		for i, p := range m.panes {
-			if p.id != msg.paneID {
-				continue
+			if p.id == msg.paneID {
+				senderIdx = i
+				break
 			}
-			switch msg.kind {
-			case "notify":
+		}
+		var sender *Pane
+		if senderIdx >= 0 {
+			sender = m.panes[senderIdx]
+		}
+		switch msg.kind {
+		case "notify":
+			if sender != nil {
 				if msg.text == "" {
+					sender.onBell()
+				} else {
+					sender.onOSC(777, msg.text)
+				}
+			}
+		case "focus":
+			if senderIdx >= 0 && senderIdx != m.focus {
+				m.focus = senderIdx
+				m.layoutPanes()
+			}
+		case "send", "type":
+			targets := m.resolveTargets(msg.target, sender)
+			if len(targets) == 0 {
+				// Resolution failures bounce back to the sender so a
+				// mistyped selector is visible instead of silently lost.
+				if sender != nil {
+					sender.onOSC(777, fmt.Sprintf("ctl %s: no pane matches %q", msg.kind, msg.target))
+				}
+				break
+			}
+			label := m.senderLabel(senderIdx, sender)
+			for _, p := range targets {
+				if msg.kind == "type" {
+					p.Write([]byte(msg.text + "\r"))
+				} else if msg.text == "" {
 					p.onBell()
 				} else {
-					p.onOSC(777, msg.text)
-				}
-			case "focus":
-				if i != m.focus {
-					m.focus = i
-					m.layoutPanes()
+					p.onOSC(777, "["+label+"] "+msg.text)
 				}
 			}
-			break
+		case "watch":
+			if sender != nil {
+				if m.subs[msg.target] == nil {
+					m.subs[msg.target] = make(map[*Pane]bool)
+				}
+				m.subs[msg.target][sender] = msg.typed
+				mode := "notify"
+				if msg.typed {
+					mode = "type"
+				}
+				m.setNotice(fmt.Sprintf("pane %d · %s watching #%s (%s)", senderIdx+1, sender.title, msg.target, mode))
+			}
+		case "unwatch":
+			if sender != nil {
+				m.dropSub(msg.target, sender)
+				m.setNotice(fmt.Sprintf("pane %d · %s unwatched #%s", senderIdx+1, sender.title, msg.target))
+			}
+		case "emit":
+			// Deliver to every subscriber except the sender; a channel
+			// with nobody to deliver to bounces an error back.
+			delivered := 0
+			for p, typed := range m.subs[msg.target] {
+				if p == sender {
+					continue
+				}
+				switch {
+				case typed:
+					// Typed delivery of an empty payload would just press
+					// enter in the subscriber's pane — skip it instead.
+					if msg.text != "" {
+						p.Write([]byte(msg.text + "\r"))
+						delivered++
+					}
+				case msg.text == "":
+					p.onBell()
+					delivered++
+				default:
+					p.onOSC(777, fmt.Sprintf("[%s·%s] %s", msg.target, m.senderLabel(senderIdx, sender), msg.text))
+					delivered++
+				}
+			}
+			if delivered == 0 && sender != nil {
+				sender.onOSC(777, fmt.Sprintf("ctl emit: channel %q has no subscribers", msg.target))
+			}
 		}
 		if m.ctlCh != nil {
 			return m, waitCtl(m.ctlCh)
@@ -722,6 +804,65 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) clearFocusedAttention() {
 	if m.focus >= 0 && m.focus < len(m.panes) {
 		m.panes[m.focus].clearAttention()
+	}
+}
+
+// resolveTargets maps a ctl send/type selector to panes: "all" (every pane
+// except the sender), a 1-based index as shown in the title bar, or an exact
+// title match (several panes may share a title). Title bar numbers shift
+// when panes close, so scripts that outlive layout changes should target by
+// title (double-click a title bar to rename).
+func (m *Model) resolveTargets(target string, sender *Pane) []*Pane {
+	if target == "all" {
+		var out []*Pane
+		for _, p := range m.panes {
+			if p != sender {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	if n, err := strconv.Atoi(target); err == nil {
+		if n >= 1 && n <= len(m.panes) {
+			return []*Pane{m.panes[n-1]}
+		}
+		return nil
+	}
+	var out []*Pane
+	for _, p := range m.panes {
+		if p.title == target {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// senderLabel renders the "<index>·<title>" prefix stamped on cross-pane
+// notifications so the receiver can tell who sent them.
+func (m *Model) senderLabel(idx int, sender *Pane) string {
+	if idx < 0 || sender == nil {
+		return "?"
+	}
+	return fmt.Sprintf("%d·%s", idx+1, sender.title)
+}
+
+// dropSub removes a pane from a ctl channel, deleting the channel once it
+// has no subscribers left.
+func (m *Model) dropSub(channel string, p *Pane) {
+	set, ok := m.subs[channel]
+	if !ok {
+		return
+	}
+	delete(set, p)
+	if len(set) == 0 {
+		delete(m.subs, channel)
+	}
+}
+
+// unsubscribeAll removes a pane from every ctl channel (called on close).
+func (m *Model) unsubscribeAll(p *Pane) {
+	for ch := range m.subs {
+		m.dropSub(ch, p)
 	}
 }
 
